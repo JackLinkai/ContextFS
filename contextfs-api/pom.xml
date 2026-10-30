@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.contextfs</groupId>
+        <artifactId>contextfs</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>contextfs-api</artifactId>
+    <name>ContextFS :: API</name>
+    <description>REST 接口层：Controller、DTO 与全局异常处理</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.contextfs</groupId>
+            <artifactId>contextfs-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.contextfs</groupId>
+            <artifactId>contextfs-retrieval</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.contextfs</groupId>
+            <artifactId>contextfs-memory</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.contextfs</groupId>
+            <artifactId>contextfs-observability</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+</project>

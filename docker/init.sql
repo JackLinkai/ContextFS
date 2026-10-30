@@ -1,0 +1,2 @@
+-- ContextFS 初始化占位脚本
+-- 阶段 2 将由 Flyway 管理 schema（ctx_node / ctx_level / session_record / 日志表）
