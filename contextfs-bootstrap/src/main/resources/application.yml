@@ -1,9 +1,20 @@
 server:
-  port: 8080
+  port: ${SERVER_PORT:8080}
 
 spring:
   application:
     name: contextfs
+  datasource:
+    url: ${POSTGRES_URL:jdbc:postgresql://localhost:5432/contextfs}
+    username: ${POSTGRES_USERNAME:contextfs}
+    password: ${POSTGRES_PASSWORD:contextfs}
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+  flyway:
+    # 阶段 2 仅交付存储适配与迁移脚本；阶段 3 装配存储 Bean 时启用
+    enabled: false
 
 management:
   endpoints:
