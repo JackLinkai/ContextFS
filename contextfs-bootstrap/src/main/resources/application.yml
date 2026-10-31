@@ -49,6 +49,10 @@ contextfs:
     score-threshold: ${RETRIEVAL_SCORE_THRESHOLD:0.3}
     token-budget: ${RETRIEVAL_TOKEN_BUDGET:4096}
     max-depth: ${RETRIEVAL_MAX_DEPTH:3}
+  memory:
+    # Session 记忆管线：enabled=false 时仅归档不提取；async=true 时提取在线程池中执行
+    enabled: ${CONTEXTFS_MEMORY_ENABLED:true}
+    async: ${MEMORY_ASYNC:true}
 
 management:
   endpoints:
