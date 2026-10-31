@@ -14,6 +14,7 @@ import com.contextfs.core.inmem.InMemoryNodeRepository;
 import com.contextfs.core.model.Level;
 import com.contextfs.core.model.NodeType;
 import com.contextfs.core.port.CacheStore;
+import com.contextfs.core.port.LlmClient;
 import com.contextfs.core.uri.CtxfsUri;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Duration;
@@ -34,9 +35,26 @@ class FileSystemServiceTest {
     void setUp() {
         repository = new InMemoryNodeRepository();
         cache = new InMemoryCacheStore();
-        service =
-                new FileSystemService(
-                        repository, cache, new ObjectMapper(), Duration.ofMinutes(10));
+        service = service(repository, cache, null);
+    }
+
+    /** 组装服务：llm 为 null 时写入不生成摘要（占位行为）。 */
+    private FileSystemService service(
+            InMemoryNodeRepository repo, InMemoryCacheStore cacheStore, LlmClient llm) {
+        LevelGenerator generator =
+                new LevelGenerator(repo, cacheStore, llm, null, null, Runnable::run);
+        return new FileSystemService(
+                repo, cacheStore, new ObjectMapper(), Duration.ofMinutes(10), generator);
+    }
+
+    /** 默认关闭三层生成，便于聚焦文件系统语义本身。 */
+    private WriteResultDto write(
+            CtxfsUri uri,
+            String content,
+            NodeType type,
+            Map<String, String> metadata,
+            String allowedScope) {
+        return service.write(uri, content, type, metadata, false, allowedScope);
     }
 
     @Nested
@@ -49,7 +67,7 @@ class FileSystemServiceTest {
             CtxfsUri uri = CtxfsUri.parse("ctxfs://user/10001/memories/preferences.md");
 
             WriteResultDto result =
-                    service.write(
+                    write(
                             uri,
                             "用户偏好简洁回答，代码示例优先使用 Java。",
                             NodeType.MEMORY,
@@ -73,10 +91,10 @@ class FileSystemServiceTest {
         @DisplayName("未指定类型时默认 DOCUMENT，重复写入覆盖内容且保留 createdAt")
         void writeOverwriteKeepsCreatedAt() {
             CtxfsUri uri = CtxfsUri.parse("ctxfs://global/notes/a.md");
-            service.write(uri, "第一版", null, null, null);
+            write(uri, "第一版", null, null, null);
             var before = repository.findByUri(uri).orElseThrow();
 
-            service.write(uri, "第二版", null, null, null);
+            write(uri, "第二版", null, null, null);
 
             var after = repository.findByUri(uri).orElseThrow();
             assertThat(after.type()).isEqualTo(NodeType.DOCUMENT);
@@ -89,14 +107,14 @@ class FileSystemServiceTest {
         @DisplayName("提供 metadata 时整体覆盖，未提供时保留原值")
         void writeMetadataReplaceOrKeep() {
             CtxfsUri uri = CtxfsUri.parse("ctxfs://global/notes/a.md");
-            service.write(uri, "内容", null, Map.of("k1", "v1", "k2", "v2"), null);
+            write(uri, "内容", null, Map.of("k1", "v1", "k2", "v2"), null);
 
-            service.write(uri, "内容2", null, Map.of("k1", "v1-new"), null);
+            write(uri, "内容2", null, Map.of("k1", "v1-new"), null);
             assertThat(repository.findByUri(uri).orElseThrow().metadata())
                     .containsEntry("k1", "v1-new")
                     .doesNotContainKey("k2");
 
-            service.write(uri, "内容3", null, null, null);
+            write(uri, "内容3", null, null, null);
             assertThat(repository.findByUri(uri).orElseThrow().metadata())
                     .containsEntry("k1", "v1-new");
         }
@@ -105,13 +123,7 @@ class FileSystemServiceTest {
         @DisplayName("拒绝向 scope 根节点写入内容")
         void rejectRootWrite() {
             assertThatThrownBy(
-                            () ->
-                                    service.write(
-                                            CtxfsUri.parse("ctxfs://global"),
-                                            "内容",
-                                            null,
-                                            null,
-                                            null))
+                            () -> write(CtxfsUri.parse("ctxfs://global"), "内容", null, null, null))
                     .isInstanceOf(IllegalArgumentException.class);
         }
     }
@@ -124,7 +136,7 @@ class FileSystemServiceTest {
         @DisplayName("L2 返回写入的完整原文")
         void readL2Content() {
             CtxfsUri uri = CtxfsUri.parse("ctxfs://global/docs/a.md");
-            service.write(uri, "完整原文", null, null, null);
+            write(uri, "完整原文", null, null, null);
 
             ReadResultDto result = service.read(uri, Level.L2, null);
 
@@ -137,7 +149,7 @@ class FileSystemServiceTest {
         @DisplayName("L0/L1 摘要未生成时返回占位文本")
         void readPlaceholderForMissingLevels() {
             CtxfsUri uri = CtxfsUri.parse("ctxfs://global/docs/a.md");
-            service.write(uri, "完整原文", null, null, null);
+            write(uri, "完整原文", null, null, null);
 
             ReadResultDto l0 = service.read(uri, Level.L0, null);
             assertThat(l0.generated()).isFalse();
@@ -163,7 +175,7 @@ class FileSystemServiceTest {
         @DisplayName("首次读取回填缓存，二次读取命中缓存")
         void readFillsCache() {
             CtxfsUri uri = CtxfsUri.parse("ctxfs://global/docs/a.md");
-            service.write(uri, "完整原文", null, null, null);
+            write(uri, "完整原文", null, null, null);
             String cacheKey = FileSystemService.CACHE_READ_PREFIX + uri + ":" + Level.L2;
 
             service.read(uri, Level.L2, null);
@@ -179,10 +191,10 @@ class FileSystemServiceTest {
         @DisplayName("write 后旧缓存被失效，读取到新内容")
         void writeInvalidatesCache() {
             CtxfsUri uri = CtxfsUri.parse("ctxfs://global/docs/a.md");
-            service.write(uri, "第一版", null, null, null);
+            write(uri, "第一版", null, null, null);
             service.read(uri, Level.L2, null);
 
-            service.write(uri, "第二版", null, null, null);
+            write(uri, "第二版", null, null, null);
             ReadResultDto result = service.read(uri, Level.L2, null);
             assertThat(result.content()).isEqualTo("第二版");
         }
@@ -190,18 +202,71 @@ class FileSystemServiceTest {
         @Test
         @DisplayName("缓存故障时降级到仓储，不影响读写主流程")
         void degradeWhenCacheFails() {
+            InMemoryCacheStore unusedCache = new InMemoryCacheStore();
+            CacheStore failingCache = new FailingCacheStore();
+            LevelGenerator generator =
+                    new LevelGenerator(repository, failingCache, null, null, null, Runnable::run);
             FileSystemService serviceWithBadCache =
                     new FileSystemService(
                             repository,
-                            new FailingCacheStore(),
+                            failingCache,
                             new ObjectMapper(),
-                            Duration.ofMinutes(10));
+                            Duration.ofMinutes(10),
+                            generator);
             CtxfsUri uri = CtxfsUri.parse("ctxfs://global/docs/a.md");
 
-            serviceWithBadCache.write(uri, "内容", null, null, null);
+            serviceWithBadCache.write(uri, "内容", null, null, false, null);
             ReadResultDto result = serviceWithBadCache.read(uri, Level.L2, null);
             assertThat(result.content()).isEqualTo("内容");
             assertThat(result.generated()).isTrue();
+            assertThat(unusedCache.get("any")).isEmpty();
+        }
+    }
+
+    @Nested
+    @DisplayName("write 触发三层生成")
+    class LevelGeneration {
+
+        @Test
+        @DisplayName("generateLevels=true 时 L0/L1 由 LLM 生成并可读取")
+        void writeGeneratesLevels() {
+            FileSystemService serviceWithLlm =
+                    service(repository, cache, new LevelGeneratorTest.FakeLlmClient());
+            CtxfsUri uri = CtxfsUri.parse("ctxfs://global/docs/a.md");
+
+            serviceWithLlm.write(uri, "并发编程要点全文", null, null, true, null);
+
+            ReadResultDto l0 = serviceWithLlm.read(uri, Level.L0, null);
+            assertThat(l0.generated()).isTrue();
+            assertThat(l0.content()).isEqualTo("【L0】并发编程要点全文");
+
+            ReadResultDto l1 = serviceWithLlm.read(uri, Level.L1, null);
+            assertThat(l1.generated()).isTrue();
+            assertThat(l1.content()).isEqualTo("【L1】并发编程要点全文");
+        }
+
+        @Test
+        @DisplayName("generateLevels=false 时保持占位")
+        void writeWithoutGenerationKeepsPlaceholder() {
+            FileSystemService serviceWithLlm =
+                    service(repository, cache, new LevelGeneratorTest.FakeLlmClient());
+            CtxfsUri uri = CtxfsUri.parse("ctxfs://global/docs/a.md");
+
+            serviceWithLlm.write(uri, "完整原文", null, null, false, null);
+
+            ReadResultDto l0 = serviceWithLlm.read(uri, Level.L0, null);
+            assertThat(l0.generated()).isFalse();
+        }
+
+        @Test
+        @DisplayName("LLM 未装配时生成降级为占位，不抛异常")
+        void writeWithoutLlmDegrades() {
+            CtxfsUri uri = CtxfsUri.parse("ctxfs://global/docs/a.md");
+
+            service.write(uri, "完整原文", null, null, true, null);
+
+            assertThat(service.read(uri, Level.L0, null).generated()).isFalse();
+            assertThat(service.read(uri, Level.L2, null).content()).isEqualTo("完整原文");
         }
     }
 
@@ -213,15 +278,14 @@ class FileSystemServiceTest {
         @DisplayName("列出直接子节点，不包含孙子节点")
         void lsDirectChildrenOnly() {
             CtxfsUri memories = CtxfsUri.parse("ctxfs://user/10001/memories");
-            service.write(
+            write(
                     CtxfsUri.parse("ctxfs://user/10001/memories/preferences.md"),
                     "内容",
                     null,
                     null,
                     null);
-            service.write(
-                    CtxfsUri.parse("ctxfs://user/10001/memories/facts.md"), "内容", null, null, null);
-            service.write(CtxfsUri.parse("ctxfs://user/10001/notes/a.md"), "内容", null, null, null);
+            write(CtxfsUri.parse("ctxfs://user/10001/memories/facts.md"), "内容", null, null, null);
+            write(CtxfsUri.parse("ctxfs://user/10001/notes/a.md"), "内容", null, null, null);
 
             var children = service.ls(memories, null);
 
@@ -254,13 +318,13 @@ class FileSystemServiceTest {
         @Test
         @DisplayName("返回嵌套子树，children 挂在对应父节点下")
         void nestedTree() {
-            service.write(
+            write(
                     CtxfsUri.parse("ctxfs://user/10001/memories/preferences.md"),
                     "内容",
                     null,
                     null,
                     null);
-            service.write(CtxfsUri.parse("ctxfs://user/10001/notes/a.md"), "内容", null, null, null);
+            write(CtxfsUri.parse("ctxfs://user/10001/notes/a.md"), "内容", null, null, null);
 
             TreeNodeDto tree = service.tree(CtxfsUri.parse("ctxfs://user/10001"), 8, null);
 
@@ -277,7 +341,7 @@ class FileSystemServiceTest {
         @Test
         @DisplayName("maxDepth=0 仅返回根节点")
         void depthZeroOnlyRoot() {
-            service.write(CtxfsUri.parse("ctxfs://global/docs/a.md"), "内容", null, null, null);
+            write(CtxfsUri.parse("ctxfs://global/docs/a.md"), "内容", null, null, null);
 
             TreeNodeDto tree = service.tree(CtxfsUri.parse("ctxfs://global/docs"), 0, null);
 
@@ -307,19 +371,19 @@ class FileSystemServiceTest {
 
         @BeforeEach
         void seed() {
-            service.write(
+            write(
                     CtxfsUri.parse("ctxfs://global/skills/search/web_search.md"),
                     "内容",
                     NodeType.SKILL,
                     Map.of("category", "search"),
                     null);
-            service.write(
+            write(
                     CtxfsUri.parse("ctxfs://global/skills/search/web_search_v2.md"),
                     "内容",
                     NodeType.SKILL,
                     Map.of("category", "search"),
                     null);
-            service.write(
+            write(
                     CtxfsUri.parse("ctxfs://global/docs/java.md"),
                     "内容",
                     NodeType.DOCUMENT,
@@ -407,12 +471,7 @@ class FileSystemServiceTest {
         @Test
         @DisplayName("allowedScope 一致时正常访问")
         void scopeMatchAllowed() {
-            service.write(
-                    CtxfsUri.parse("ctxfs://user/10001/notes/a.md"),
-                    "内容",
-                    null,
-                    null,
-                    "user/10001");
+            write(CtxfsUri.parse("ctxfs://user/10001/notes/a.md"), "内容", null, null, "user/10001");
             var result =
                     service.read(
                             CtxfsUri.parse("ctxfs://user/10001/notes/a.md"),

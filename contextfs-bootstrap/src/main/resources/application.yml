@@ -19,9 +19,25 @@ contextfs:
   cache:
     # 读路径缓存 TTL（ISO-8601 时长）
     read-ttl: ${CACHE_READ_TTL:PT10M}
+  levels:
+    # write 后是否异步生成 L0/L1 摘要与向量
+    async: ${LEVELS_ASYNC:true}
+  llm:
+    # L0/L1 摘要生成（OpenAI 兼容接口）
+    enabled: ${LLM_ENABLED:false}
+    base-url: ${LLM_BASE_URL:https://api.openai.com/v1}
+    api-key: ${LLM_API_KEY:}
+    model: ${LLM_MODEL:gpt-4o-mini}
+    timeout: ${LLM_TIMEOUT:PT60S}
+  embedding:
+    # 三层内容向量化（OpenAI 兼容接口），维度需与 contextfs.storage.milvus.dimension 一致
+    enabled: ${EMBEDDING_ENABLED:false}
+    base-url: ${EMBEDDING_BASE_URL:https://api.openai.com/v1}
+    api-key: ${EMBEDDING_API_KEY:}
+    model: ${EMBEDDING_MODEL:text-embedding-3-small}
   storage:
     milvus:
-      # Milvus 适配构造即建立 gRPC 连接，阶段 4 接入向量化时再显式开启
+      # Milvus 适配构造即建立 gRPC 连接，仅在同时启用向量检索时开启
       enabled: ${MILVUS_ENABLED:false}
       host: ${MILVUS_HOST:localhost}
       port: ${MILVUS_PORT:19530}

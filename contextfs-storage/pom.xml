@@ -12,7 +12,7 @@
 
     <artifactId>contextfs-storage</artifactId>
     <name>ContextFS :: Storage</name>
-    <description>PostgreSQL / Milvus / Redis 存储适配</description>
+    <description>PostgreSQL / Redis / Milvus / LLM（LangChain4j）适配</description>
 
     <dependencies>
         <dependency>
@@ -51,6 +51,12 @@
             <groupId>io.milvus</groupId>
             <artifactId>milvus-sdk-java</artifactId>
             <version>${milvus-sdk.version}</version>
+        </dependency>
+
+        <!-- LLM / Embedding（OpenAI 兼容接口，经 LangChain4j） -->
+        <dependency>
+            <groupId>dev.langchain4j</groupId>
+            <artifactId>langchain4j-open-ai</artifactId>
         </dependency>
 
         <!-- metadata jsonb 序列化 -->

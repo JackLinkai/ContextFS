@@ -39,9 +39,15 @@ public class FsController {
             @Valid @RequestBody WriteRequest request,
             @RequestHeader(value = SCOPE_HEADER, required = false) String allowedScope) {
         CtxfsUri uri = CtxfsUri.parse(request.uri());
+        boolean generateLevels = request.generateLevels() == null || request.generateLevels();
         return ApiResponse.ok(
                 fileSystemService.write(
-                        uri, request.content(), request.type(), request.metadata(), allowedScope));
+                        uri,
+                        request.content(),
+                        request.type(),
+                        request.metadata(),
+                        generateLevels,
+                        allowedScope));
     }
 
     @GetMapping("/read")

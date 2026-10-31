@@ -32,7 +32,8 @@ import org.springframework.stereotype.Service;
 /**
  * 虚拟文件系统应用服务：实现 POSIX 风格的 ls / tree / read / write / find 操作。
  *
- * <p>阶段 3 占位说明：L0 / L1 摘要尚未接入 LLM 生成，read 返回占位文本；L2 即写入的完整原文。 缓存接入读路径，写路径主动失效；所有缓存操作失败时降级，不影响主流程。
+ * <p>write 保存 L2 原文并触发三层生成（L0 / L1 摘要 + 向量化，见 {@link LevelGenerator}）； read 按层返回：已生成的层级返回真实内容，未生成的
+ * L0 / L1 返回占位文本，LLM 不可用时 L2 直读兜底。 缓存接入读路径，写路径主动失效；所有缓存操作失败时降级，不影响主流程。
  */
 @Service
 public class FileSystemService {
@@ -50,16 +51,19 @@ public class FileSystemService {
     private final CacheStore cacheStore;
     private final ObjectMapper objectMapper;
     private final Duration cacheTtl;
+    private final LevelGenerator levelGenerator;
 
     public FileSystemService(
             NodeRepository nodeRepository,
             CacheStore cacheStore,
             ObjectMapper objectMapper,
-            @Value("${contextfs.cache.read-ttl:PT10M}") Duration cacheTtl) {
+            @Value("${contextfs.cache.read-ttl:PT10M}") Duration cacheTtl,
+            LevelGenerator levelGenerator) {
         this.nodeRepository = Objects.requireNonNull(nodeRepository, "nodeRepository");
         this.cacheStore = Objects.requireNonNull(cacheStore, "cacheStore");
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper");
         this.cacheTtl = Objects.requireNonNull(cacheTtl, "cacheTtl");
+        this.levelGenerator = Objects.requireNonNull(levelGenerator, "levelGenerator");
     }
 
     /** 列出直接子节点（ls）。scope 根节点允许隐式存在，其余节点必须已创建。 */
@@ -97,7 +101,7 @@ public class FileSystemService {
     /**
      * 读取节点某一层内容（read）。
      *
-     * <p>L2 为完整原文；L0 / L1 在摘要未生成时返回占位文本（generated=false）。
+     * <p>L2 为完整原文；L0 / L1 已生成时返回真实摘要，未生成时返回占位文本（generated=false）。
      */
     public ReadResultDto read(CtxfsUri uri, Level level, String allowedScope) {
         checkScope(uri, allowedScope);
@@ -143,12 +147,15 @@ public class FileSystemService {
     /**
      * 写入或覆盖节点内容（write），内容保存为 L2。自动创建缺失的父目录（mkdir -p 语义）； 未指定类型时沿用已有节点类型，否则默认 DOCUMENT；提供 metadata
      * 时整体覆盖。
+     *
+     * @param generateLevels 是否触发 L0 / L1 摘要生成与向量化（异步）
      */
     public WriteResultDto write(
             CtxfsUri uri,
             String content,
             NodeType type,
             Map<String, String> metadata,
+            boolean generateLevels,
             String allowedScope) {
         checkScope(uri, allowedScope);
         Objects.requireNonNull(content, "content");
@@ -177,6 +184,9 @@ public class FileSystemService {
         nodeRepository.saveLevel(uri, new NodeLevel(Level.L2, content, estimateTokens(content)));
         // 内容变更后该节点全部层级缓存失效
         evictQuietly(CACHE_READ_PREFIX + uri + ":");
+        if (generateLevels) {
+            levelGenerator.generateAsync(uri, content, nodeType);
+        }
         return new WriteResultDto(uri.toString(), nodeType, now);
     }
 

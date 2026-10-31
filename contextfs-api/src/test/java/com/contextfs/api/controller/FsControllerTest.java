@@ -8,8 +8,10 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 import com.contextfs.api.common.GlobalExceptionHandler;
 import com.contextfs.api.fs.FileSystemService;
+import com.contextfs.api.fs.LevelGenerator;
 import com.contextfs.core.inmem.InMemoryCacheStore;
 import com.contextfs.core.inmem.InMemoryNodeRepository;
+import com.contextfs.core.port.LlmClient;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Duration;
 import org.junit.jupiter.api.BeforeEach;
@@ -27,17 +29,21 @@ class FsControllerTest {
 
     @BeforeEach
     void setUp() {
+        mockMvc = mockMvcWith(null);
+    }
+
+    /** 组装 MockMvc：llm 为 null 时写入不生成摘要（占位行为）。 */
+    private MockMvc mockMvcWith(LlmClient llm) {
         InMemoryNodeRepository repository = new InMemoryNodeRepository();
+        InMemoryCacheStore cache = new InMemoryCacheStore();
+        LevelGenerator generator =
+                new LevelGenerator(repository, cache, llm, null, null, Runnable::run);
         FileSystemService service =
                 new FileSystemService(
-                        repository,
-                        new InMemoryCacheStore(),
-                        new ObjectMapper(),
-                        Duration.ofMinutes(10));
-        mockMvc =
-                MockMvcBuilders.standaloneSetup(new FsController(service))
-                        .setControllerAdvice(new GlobalExceptionHandler())
-                        .build();
+                        repository, cache, new ObjectMapper(), Duration.ofMinutes(10), generator);
+        return MockMvcBuilders.standaloneSetup(new FsController(service))
+                .setControllerAdvice(new GlobalExceptionHandler())
+                .build();
     }
 
     @Test
@@ -89,6 +95,58 @@ class FsControllerTest {
                                 .content(body))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.code").value(400));
+    }
+
+    @Test
+    @DisplayName("write 默认触发三层生成，read L0 返回 LLM 摘要")
+    void writeGeneratesLevels() throws Exception {
+        MockMvc mvc = mockMvcWith((content, level) -> "【摘要】" + content);
+
+        mvc.perform(
+                        post("/api/v1/fs/write")
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content(
+                                        """
+                                        {"uri": "ctxfs://global/docs/a.md", "content": "并发编程要点全文"}
+                                        """))
+                .andExpect(status().isOk());
+
+        String body =
+                mvc.perform(
+                                get("/api/v1/fs/read")
+                                        .param("uri", "ctxfs://global/docs/a.md")
+                                        .param("level", "L0"))
+                        .andExpect(status().isOk())
+                        .andReturn()
+                        .getResponse()
+                        .getContentAsString(java.nio.charset.StandardCharsets.UTF_8);
+        assertThat(body).contains("并发编程要点全文").contains("\"generated\":true");
+    }
+
+    @Test
+    @DisplayName("write 显式 generateLevels=false 时保持占位")
+    void writeWithoutGenerationKeepsPlaceholder() throws Exception {
+        MockMvc mvc = mockMvcWith((content, level) -> "【摘要】" + content);
+
+        mvc.perform(
+                        post("/api/v1/fs/write")
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content(
+                                        """
+                                        {"uri": "ctxfs://global/docs/a.md", "content": "全文", "generateLevels": false}
+                                        """))
+                .andExpect(status().isOk());
+
+        String body =
+                mvc.perform(
+                                get("/api/v1/fs/read")
+                                        .param("uri", "ctxfs://global/docs/a.md")
+                                        .param("level", "L0"))
+                        .andExpect(status().isOk())
+                        .andReturn()
+                        .getResponse()
+                        .getContentAsString(java.nio.charset.StandardCharsets.UTF_8);
+        assertThat(body).contains("\"generated\":false").contains("占位");
     }
 
     @Test
