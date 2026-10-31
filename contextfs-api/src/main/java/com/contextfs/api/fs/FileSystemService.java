@@ -237,22 +237,9 @@ public class FileSystemService {
         return "【占位】" + level + " 摘要尚未生成，将在三层内容生成阶段由 LLM 生成。";
     }
 
-    /** 粗略 token 估算：CJK 字符按 1 token，其余按每 4 字符 1 token。阶段 4 换成真实分词器。 */
+    /** 粗略 token 估算：委托 {@link com.contextfs.core.util.Tokens}。 */
     static int estimateTokens(String content) {
-        if (content == null || content.isEmpty()) {
-            return 0;
-        }
-        int cjk = 0;
-        int other = 0;
-        for (int i = 0; i < content.length(); i++) {
-            char c = content.charAt(i);
-            if (c >= 0x4E00 && c <= 0x9FFF) {
-                cjk++;
-            } else {
-                other++;
-            }
-        }
-        return cjk + (other + 3) / 4;
+        return com.contextfs.core.util.Tokens.estimate(content);
     }
 
     private void requireNodeUnlessRoot(CtxfsUri uri) {

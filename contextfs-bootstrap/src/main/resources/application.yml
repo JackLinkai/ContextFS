@@ -42,6 +42,13 @@ contextfs:
       host: ${MILVUS_HOST:localhost}
       port: ${MILVUS_PORT:19530}
       dimension: ${MILVUS_DIMENSION:1024}
+  retrieval:
+    # 目录递归检索：首轮 L0 向量 topK、内容加载最高层级、命中分数阈值、token 预算与下钻深度
+    top-k-dir: ${RETRIEVAL_TOP_K_DIR:5}
+    max-level: ${RETRIEVAL_MAX_LEVEL:L1}
+    score-threshold: ${RETRIEVAL_SCORE_THRESHOLD:0.3}
+    token-budget: ${RETRIEVAL_TOKEN_BUDGET:4096}
+    max-depth: ${RETRIEVAL_MAX_DEPTH:3}
 
 management:
   endpoints:
