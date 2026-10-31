@@ -17,12 +17,12 @@ import com.contextfs.retrieval.engine.RetrievalMode;
 import com.contextfs.retrieval.engine.RetrievalResult;
 import com.contextfs.retrieval.engine.RetrievalService;
 import com.contextfs.retrieval.support.HashingEmbeddingClient;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.BeforeAll;
@@ -34,14 +34,15 @@ import org.junit.jupiter.api.Test;
  *
  * <p>语料为 10 节点（3 目录 + 7 文档），嵌入使用 {@link HashingEmbeddingClient}（字符 unigram + bigram
  * 哈希），查询复用语料中的关键短语，验证检索链路与质量下限。 token 对比口径：同一命中集合下「三层按需加载」的注入 token 与
- * 「直接注入命中节点 L2 原文」的 token 求降幅；延迟对每查询多次执行取 P50 / P95。 基线指标写入 {@code
- * target/retrieval-eval-baseline.json}，供后续真实嵌入模型对比。
+ * 「直接注入命中节点 L2 原文」的 token 求降幅；延迟对每查询多次执行取 P50 / P95。 基线指标经 Jackson 序列化写入 {@code
+ * target/retrieval-eval-baseline.json}（保证引号与反斜杠正确转义），供后续真实嵌入模型对比。
  */
 @DisplayName("检索质量评测集")
 class RetrievalEvalTest {
 
     private static final String SCOPE = "global";
     private static final RetrievalConfig CONFIG = new RetrievalConfig(5, Level.L1, 0.2, 4096, 3);
+    private static final ObjectMapper JSON = new ObjectMapper();
 
     private static RetrievalService service;
     private static InMemoryNodeRepository repository;
@@ -87,7 +88,7 @@ class RetrievalEvalTest {
         long l2TokenSum = 0;
         long latencySum = 0;
         int itemCount = 0;
-        List<String> perQueryJson = new ArrayList<>();
+        List<Map<String, Object>> perQuery = new ArrayList<>();
 
         for (int i = 0; i < QUERIES.size(); i++) {
             String query = QUERIES.get(i);
@@ -111,20 +112,14 @@ class RetrievalEvalTest {
             l2TokenSum += l2Tokens;
             latencySum += result.latencyMs();
 
-            perQueryJson.add(
-                    "{\"query\": \""
-                            + query
-                            + "\", \"expected\": \""
-                            + expected
-                            + "\", \"top3\": "
-                            + jsonArray(top3)
-                            + ", \"hit\": "
-                            + hit
-                            + ", \"loadedTokens\": "
-                            + result.tokenUsage().promptTokens()
-                            + ", \"l2FullTokens\": "
-                            + l2Tokens
-                            + "}");
+            Map<String, Object> queryStat = new LinkedHashMap<>();
+            queryStat.put("query", query);
+            queryStat.put("expected", expected);
+            queryStat.put("top3", top3);
+            queryStat.put("hit", hit);
+            queryStat.put("loadedTokens", result.tokenUsage().promptTokens());
+            queryStat.put("l2FullTokens", l2Tokens);
+            perQuery.add(queryStat);
         }
 
         double recallAt3 = recallSum / QUERIES.size();
@@ -165,32 +160,19 @@ class RetrievalEvalTest {
                 .as("三层加载相对直接注入 L2 的 token 降幅应不低于 40%")
                 .isGreaterThanOrEqualTo(0.4);
 
-        String baseline =
-                "{\n  \"queries\": "
-                        + QUERIES.size()
-                        + ",\n  \"recallAt3\": "
-                        + recallAt3
-                        + ",\n  \"avgLoadedLevel\": "
-                        + avgLoadedLevel
-                        + ",\n  \"avgLoadedTokens\": "
-                        + avgPromptTokens
-                        + ",\n  \"avgL2FullTokens\": "
-                        + (double) l2TokenSum / QUERIES.size()
-                        + ",\n  \"tokenReductionVsL2\": "
-                        + tokenReduction
-                        + ",\n  \"latencyP50Ms\": "
-                        + p50
-                        + ",\n  \"latencyP95Ms\": "
-                        + p95
-                        + ",\n  \"avgLatencyMs\": "
-                        + avgLatencyMs
-                        + ",\n  \"perQuery\": [\n    "
-                        + String.join(",\n    ", perQueryJson)
-                        + "\n  ]\n}";
-        Files.writeString(
-                Path.of("target", "retrieval-eval-baseline.json"),
-                baseline,
-                StandardCharsets.UTF_8);
+        Map<String, Object> baseline = new LinkedHashMap<>();
+        baseline.put("queries", QUERIES.size());
+        baseline.put("recallAt3", recallAt3);
+        baseline.put("avgLoadedLevel", avgLoadedLevel);
+        baseline.put("avgLoadedTokens", avgPromptTokens);
+        baseline.put("avgL2FullTokens", (double) l2TokenSum / QUERIES.size());
+        baseline.put("tokenReductionVsL2", tokenReduction);
+        baseline.put("latencyP50Ms", p50);
+        baseline.put("latencyP95Ms", p95);
+        baseline.put("avgLatencyMs", avgLatencyMs);
+        baseline.put("perQuery", perQuery);
+        JSON.writerWithDefaultPrettyPrinter()
+                .writeValue(Path.of("target", "retrieval-eval-baseline.json").toFile(), baseline);
     }
 
     /** 节点 L2 原文 token 数；目录节点无 L2 视为 0。 */
@@ -210,10 +192,6 @@ class RetrievalEvalTest {
             case L1 -> 1;
             case L2 -> 2;
         };
-    }
-
-    private static String jsonArray(List<String> values) {
-        return values.stream().map(v -> "\"" + v + "\"").toList().toString();
     }
 
     /** 评测语料构建器：10 节点，目录只写 L0，文档写全 L0/L1/L2 并为 L0 建向量。 */

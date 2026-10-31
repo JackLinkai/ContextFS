@@ -2,11 +2,12 @@ package com.contextfs.memory.pipeline;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -15,13 +16,14 @@ import org.junit.jupiter.api.Test;
  *
  * <p>评测对象为规则式 {@link MemoryExtractor}：仅 user 角色、长度 ≥ 6 字符参与提取， 按 偏好 → 经验 → 事实
  * 优先级分类。标注样本按规则设计避免跨类关键词碰撞（经验样本不含偏好关键词， 事实样本不含偏好与经验关键词）；干扰样本覆盖过短、无关键词、非 user 角色、空白四类应被忽略的情形。
- * 逐条提取（规避每类单次最多 3 条的上限），准确率断言 ≥ 0.9，明细写入 {@code target/memory-eval-accuracy.json}
- * 供接入 LLM 语义提取后对比。
+ * 逐条提取（规避每类单次最多 3 条的上限），准确率断言 ≥ 0.9，明细经 Jackson 序列化写入 {@code
+ * target/memory-eval-accuracy.json}（保证引号与反斜杠正确转义），供接入 LLM 语义提取后对比。
  */
 @DisplayName("记忆提取准确率评测集")
 class MemoryExtractionEvalTest {
 
     private static final MemoryExtractor EXTRACTOR = new MemoryExtractor();
+    private static final ObjectMapper JSON = new ObjectMapper();
 
     /** 标注样本：消息内容 → 期望类型。 */
     private record Labeled(String content, MemoryType expected) {}
@@ -62,7 +64,7 @@ class MemoryExtractionEvalTest {
         int correct = 0;
         int[] totalPerType = new int[MemoryType.values().length];
         int[] correctPerType = new int[MemoryType.values().length];
-        List<String> perSampleJson = new ArrayList<>();
+        List<Map<String, Object>> perSample = new ArrayList<>();
 
         for (Labeled labeled : LABELED) {
             List<MemoryCandidate> candidates =
@@ -74,16 +76,12 @@ class MemoryExtractionEvalTest {
                 correctPerType[labeled.expected().ordinal()]++;
             }
             totalPerType[labeled.expected().ordinal()]++;
-            perSampleJson.add(
-                    "{\"content\": \""
-                            + labeled.content()
-                            + "\", \"expected\": \""
-                            + labeled.expected()
-                            + "\", \"actual\": "
-                            + (actual == null ? "null" : "\"" + actual + "\"")
-                            + ", \"correct\": "
-                            + hit
-                            + "}");
+            Map<String, Object> sample = new LinkedHashMap<>();
+            sample.put("content", labeled.content());
+            sample.put("expected", labeled.expected().name());
+            sample.put("actual", actual == null ? null : actual.name());
+            sample.put("correct", hit);
+            perSample.add(sample);
         }
 
         double accuracy = (double) correct / LABELED.size();
@@ -97,30 +95,25 @@ class MemoryExtractionEvalTest {
         assertThat(accuracy).as("分类准确率应不低于 0.9").isGreaterThanOrEqualTo(0.9);
         assertThat(ignored).as("干扰样本应全部被忽略").isEqualTo(DISTRACTORS.size());
 
-        StringBuilder json = new StringBuilder();
-        json.append("{\n  \"labeledSamples\": ").append(LABELED.size());
-        json.append(",\n  \"correct\": ").append(correct);
-        json.append(",\n  \"accuracy\": ").append(accuracy);
-        json.append(",\n  \"distractors\": ").append(DISTRACTORS.size());
-        json.append(",\n  \"distractorsIgnored\": ").append(ignored);
-        json.append(",\n  \"perType\": [");
+        List<Map<String, Object>> perType = new ArrayList<>();
         for (MemoryType type : MemoryType.values()) {
-            json
-                    .append("\n    {\"type\": \"")
-                    .append(type)
-                    .append("\", \"total\": ")
-                    .append(totalPerType[type.ordinal()])
-                    .append(", \"correct\": ")
-                    .append(correctPerType[type.ordinal()])
-                    .append("},");
+            Map<String, Object> typeStat = new LinkedHashMap<>();
+            typeStat.put("type", type.name());
+            typeStat.put("total", totalPerType[type.ordinal()]);
+            typeStat.put("correct", correctPerType[type.ordinal()]);
+            perType.add(typeStat);
         }
-        json.deleteCharAt(json.length() - 1).append("\n  ]");
-        json.append(",\n  \"perSample\": [\n    ")
-                .append(String.join(",\n    ", perSampleJson))
-                .append("\n  ]\n}");
-        Files.writeString(
-                Path.of("target", "memory-eval-accuracy.json"),
-                json.toString(),
-                StandardCharsets.UTF_8);
+
+        Map<String, Object> report = new LinkedHashMap<>();
+        report.put("labeledSamples", LABELED.size());
+        report.put("correct", correct);
+        report.put("accuracy", accuracy);
+        report.put("distractors", DISTRACTORS.size());
+        report.put("distractorsIgnored", ignored);
+        report.put("perType", perType);
+        report.put("perSample", perSample);
+
+        Path output = Path.of("target", "memory-eval-accuracy.json");
+        JSON.writerWithDefaultPrettyPrinter().writeValue(output.toFile(), report);
     }
 }
