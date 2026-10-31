@@ -19,6 +19,10 @@
             <groupId>com.contextfs</groupId>
             <artifactId>contextfs-core</artifactId>
         </dependency>
+        <dependency>
+            <groupId>com.contextfs</groupId>
+            <artifactId>contextfs-observability</artifactId>
+        </dependency>
 
         <!-- JDBC + PostgreSQL + Flyway -->
         <dependency>

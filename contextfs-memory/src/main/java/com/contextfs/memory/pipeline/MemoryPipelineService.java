@@ -10,15 +10,25 @@ import com.contextfs.core.port.VectorRecord;
 import com.contextfs.core.port.VectorStore;
 import com.contextfs.core.uri.CtxfsUri;
 import com.contextfs.core.util.Tokens;
+import com.contextfs.observability.log.ToolCallLogEntry;
+import com.contextfs.observability.log.TraceLogStore;
+import com.contextfs.observability.trace.TraceSpanFilter;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
+import java.util.UUID;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
@@ -30,7 +40,7 @@ import org.springframework.stereotype.Service;
  *
  * <p>记忆写入调用方对应的目标 scope：userId 优先 → {@code user/{userId}}，其次 agentId → {@code
  * agent/{agentId}}，均缺省写入 {@code global}；会话归档固定写入 {@code session/{sessionId}}，实现四级 scope
- * 隔离。提取与合并决策以结构化日志输出， 阶段 7 接入 retrieval_log / tool_call_log 后落库。
+ * 隔离。提取与合并决策除结构化日志外同步落 tool_call_log（traceId 贯穿，可回放）。
  *
  * <p>{@code contextfs.memory.enabled=false} 时仅归档不提取；{@code async=true} 时提取在
  * 线程池中异步执行。EmbeddingClient / VectorStore 缺省时跳过向量化，不影响主流程。
@@ -42,6 +52,12 @@ public class MemoryPipelineService {
 
     /** memories 目录名，记忆节点挂载在 {@code ctxfs://{scope}/memories} 下。 */
     public static final String MEMORIES_DIR = "memories";
+
+    /** tool_call_log 工具名：记忆提取。 */
+    public static final String TOOL_EXTRACT = "memory.extract";
+
+    /** tool_call_log 工具名：单条记忆合并决策。 */
+    public static final String TOOL_DECIDE = "memory.decide";
 
     /** 合并决策阈值：相似度不低于该值时合并进已有记忆。 */
     static final double MERGE_THRESHOLD = 0.65;
@@ -55,12 +71,16 @@ public class MemoryPipelineService {
     /** 同步执行器标记：executor 为该实例时表示不经过线程池。 */
     public static final Executor SYNC_EXECUTOR = Runnable::run;
 
+    private static final SecureRandom RANDOM = new SecureRandom();
+
     private final NodeRepository nodeRepository;
     private final EmbeddingClient embeddingClient;
     private final VectorStore vectorStore;
     private final MemoryExtractor extractor;
     private final boolean enabled;
     private final Executor executor;
+    private final TraceLogStore traceLogStore;
+    private final ObjectMapper objectMapper;
 
     @Autowired
     public MemoryPipelineService(
@@ -68,6 +88,8 @@ public class MemoryPipelineService {
             ObjectProvider<EmbeddingClient> embeddingProvider,
             ObjectProvider<VectorStore> vectorProvider,
             MemoryExtractor extractor,
+            ObjectProvider<TraceLogStore> traceLogStoreProvider,
+            ObjectMapper objectMapper,
             @Value("${contextfs.memory.enabled:true}") boolean enabled,
             @Value("${contextfs.memory.async:true}") boolean async) {
         this(
@@ -76,10 +98,12 @@ public class MemoryPipelineService {
                 vectorProvider.getIfAvailable(),
                 extractor,
                 enabled,
-                async ? defaultExecutor() : SYNC_EXECUTOR);
+                async ? defaultExecutor() : SYNC_EXECUTOR,
+                traceLogStoreProvider.getIfAvailable(),
+                objectMapper);
     }
 
-    /** 测试与手动装配入口：依赖直传，嵌入与向量可空。 */
+    /** 测试与手动装配入口：依赖直传，嵌入与向量可空，不记录 tool_call_log。 */
     public MemoryPipelineService(
             NodeRepository nodeRepository,
             EmbeddingClient embeddingClient,
@@ -87,12 +111,35 @@ public class MemoryPipelineService {
             MemoryExtractor extractor,
             boolean enabled,
             Executor executor) {
+        this(
+                nodeRepository,
+                embeddingClient,
+                vectorStore,
+                extractor,
+                enabled,
+                executor,
+                null,
+                null);
+    }
+
+    /** 测试与手动装配入口：含链路日志，提取与决策写入 tool_call_log。 */
+    public MemoryPipelineService(
+            NodeRepository nodeRepository,
+            EmbeddingClient embeddingClient,
+            VectorStore vectorStore,
+            MemoryExtractor extractor,
+            boolean enabled,
+            Executor executor,
+            TraceLogStore traceLogStore,
+            ObjectMapper objectMapper) {
         this.nodeRepository = Objects.requireNonNull(nodeRepository, "nodeRepository");
         this.embeddingClient = embeddingClient;
         this.vectorStore = vectorStore;
         this.extractor = Objects.requireNonNull(extractor, "extractor");
         this.enabled = enabled;
         this.executor = Objects.requireNonNull(executor, "executor");
+        this.traceLogStore = traceLogStore;
+        this.objectMapper = objectMapper;
     }
 
     /** 提取是否在异步线程池中执行。 */
@@ -110,7 +157,24 @@ public class MemoryPipelineService {
      */
     public CommitOutcome commit(
             String sessionId, String agentId, String userId, List<SessionMessage> messages) {
+        // HTTP 线程内从 MDC 取入口过滤器注入的 traceId；异步执行时由 commitAsync 预先捕获
+        return commit(sessionId, agentId, userId, messages, MDC.get(TraceSpanFilter.MDC_TRACE_ID));
+    }
+
+    /**
+     * 提交会话（带链路追踪）。
+     *
+     * @param traceId 链路追踪 ID，空时自动生成
+     */
+    public CommitOutcome commit(
+            String sessionId,
+            String agentId,
+            String userId,
+            List<SessionMessage> messages,
+            String traceId) {
         Objects.requireNonNull(sessionId, "sessionId");
+        String trace =
+                traceId == null || traceId.isBlank() ? UUID.randomUUID().toString() : traceId;
         List<SessionMessage> safeMessages = messages == null ? List.of() : List.copyOf(messages);
         // 1. 归档：会话消息落库为 DOCUMENT 节点
         CtxfsUri archiveUri = CtxfsUri.of("session/" + sessionId, "archive.md");
@@ -120,20 +184,114 @@ public class MemoryPipelineService {
             return new CommitOutcome(archiveUri.toString(), List.of());
         }
         // 2. 提取
+        long extractStart = System.nanoTime();
         List<MemoryCandidate> candidates = extractor.extract(safeMessages);
+        appendToolCallQuietly(
+                trace,
+                sessionId,
+                agentId,
+                TOOL_EXTRACT,
+                Map.of("sessionId", sessionId, "messageCount", safeMessages.size()),
+                Map.of("candidates", describe(candidates)),
+                extractStart);
         // 3. 决策与写入
         String targetScope = targetScope(agentId, userId);
         List<MemoryChange> changes = new ArrayList<>();
         for (MemoryCandidate candidate : candidates) {
-            changes.add(mergeOrCreate(targetScope, candidate));
+            long decideStart = System.nanoTime();
+            MemoryChange change = mergeOrCreate(targetScope, candidate);
+            appendToolCallQuietly(
+                    trace,
+                    sessionId,
+                    agentId,
+                    TOOL_DECIDE,
+                    Map.of("type", candidate.type().name(), "content", candidate.content()),
+                    Map.of(
+                            "decision", change.decision().name(),
+                            "similarity", change.similarity(),
+                            "uri", change.uri()),
+                    decideStart);
+            changes.add(change);
         }
         return new CommitOutcome(archiveUri.toString(), List.copyOf(changes));
     }
 
-    /** 异步提交：async=true 时经线程池执行，调用方立即返回。 */
+    /** 异步提交：async=true 时经线程池执行，调用方立即返回；traceId 在 HTTP 线程内捕获。 */
     public void commitAsync(
             String sessionId, String agentId, String userId, List<SessionMessage> messages) {
-        executor.execute(() -> commit(sessionId, agentId, userId, messages));
+        commitAsync(sessionId, agentId, userId, messages, MDC.get(TraceSpanFilter.MDC_TRACE_ID));
+    }
+
+    /** 异步提交（带链路追踪）。 */
+    public void commitAsync(
+            String sessionId,
+            String agentId,
+            String userId,
+            List<SessionMessage> messages,
+            String traceId) {
+        executor.execute(() -> commit(sessionId, agentId, userId, messages, traceId));
+    }
+
+    /** 记录 tool_call_log：链路日志缺省 / 序列化或写入失败时跳过，不影响管线主流程。 */
+    private void appendToolCallQuietly(
+            String traceId,
+            String sessionId,
+            String agentId,
+            String tool,
+            Map<String, ?> input,
+            Map<String, ?> output,
+            long startNanos) {
+        if (traceLogStore == null) {
+            return;
+        }
+        try {
+            traceLogStore.appendToolCallLog(
+                    new ToolCallLogEntry(
+                            traceId,
+                            newSpanId(),
+                            sessionId,
+                            agentId,
+                            tool,
+                            toJson(input),
+                            toJson(output),
+                            (System.nanoTime() - startNanos) / 1_000_000,
+                            "OK",
+                            null,
+                            Instant.now()));
+        } catch (RuntimeException e) {
+            log.debug("tool_call_log 写入跳过: tool={}, error={}", tool, e.getMessage());
+        }
+    }
+
+    /** 候选记忆摘要：type + content，供 tool_call_log 记录。 */
+    private List<Map<String, String>> describe(List<MemoryCandidate> candidates) {
+        return candidates.stream()
+                .map(
+                        candidate ->
+                                Map.of(
+                                        "type",
+                                        candidate.type().name(),
+                                        "content",
+                                        candidate.content()))
+                .toList();
+    }
+
+    private String toJson(Object value) {
+        if (objectMapper == null) {
+            return String.valueOf(value);
+        }
+        try {
+            return objectMapper.writeValueAsString(value);
+        } catch (JsonProcessingException e) {
+            return String.valueOf(value);
+        }
+    }
+
+    /** 生成 16 位十六进制 spanId。 */
+    private static String newSpanId() {
+        byte[] bytes = new byte[8];
+        RANDOM.nextBytes(bytes);
+        return HexFormat.of().formatHex(bytes);
     }
 
     /** 对单条候选记忆做合并决策：与目标 scope 下已有 MEMORY 节点比较词法相似度。 */

@@ -10,8 +10,13 @@ import com.contextfs.core.port.VectorMatch;
 import com.contextfs.core.port.VectorStore;
 import com.contextfs.core.uri.CtxfsUri;
 import com.contextfs.core.util.Tokens;
+import com.contextfs.observability.log.RetrievalLogEntry;
+import com.contextfs.observability.log.TraceLogStore;
+import java.security.SecureRandom;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -46,13 +51,16 @@ public class RetrievalService {
     private final VectorStore vectorStore;
     private final EmbeddingClient embeddingClient;
     private final RetrievalConfig config;
+    private final TraceLogStore traceLogStore;
+    private final SecureRandom random = new SecureRandom();
 
-    /** Spring 装配入口：向量库与嵌入模型均可能未启用，取不到时为 null 并走词法降级。 */
+    /** Spring 装配入口：向量库、嵌入模型与链路日志均可能未启用，取不到时降级 / 跳过。 */
     @Autowired
     public RetrievalService(
             NodeRepository nodeRepository,
             ObjectProvider<VectorStore> vectorStoreProvider,
             ObjectProvider<EmbeddingClient> embeddingClientProvider,
+            ObjectProvider<TraceLogStore> traceLogStoreProvider,
             @Value("${contextfs.retrieval.top-k-dir:5}") int topKDir,
             @Value("${contextfs.retrieval.max-level:L1}") Level maxLevel,
             @Value("${contextfs.retrieval.score-threshold:0.3}") double scoreThreshold,
@@ -62,19 +70,31 @@ public class RetrievalService {
                 nodeRepository,
                 vectorStoreProvider.getIfAvailable(),
                 embeddingClientProvider.getIfAvailable(),
-                new RetrievalConfig(topKDir, maxLevel, scoreThreshold, tokenBudget, maxDepth));
+                new RetrievalConfig(topKDir, maxLevel, scoreThreshold, tokenBudget, maxDepth),
+                traceLogStoreProvider.getIfAvailable());
     }
 
-    /** 测试与手动装配入口：依赖直传，可空。 */
+    /** 测试与手动装配入口：依赖直传，可空，不记录检索日志。 */
     public RetrievalService(
             NodeRepository nodeRepository,
             VectorStore vectorStore,
             EmbeddingClient embeddingClient,
             RetrievalConfig config) {
+        this(nodeRepository, vectorStore, embeddingClient, config, null);
+    }
+
+    /** 测试与手动装配入口：含链路日志，检索完成后写 retrieval_log。 */
+    public RetrievalService(
+            NodeRepository nodeRepository,
+            VectorStore vectorStore,
+            EmbeddingClient embeddingClient,
+            RetrievalConfig config,
+            TraceLogStore traceLogStore) {
         this.nodeRepository = Objects.requireNonNull(nodeRepository, "nodeRepository");
         this.vectorStore = vectorStore;
         this.embeddingClient = embeddingClient;
         this.config = Objects.requireNonNull(config, "config");
+        this.traceLogStore = traceLogStore;
     }
 
     /** 默认配置，供接口层在其基础上做请求级覆盖。 */
@@ -102,16 +122,96 @@ public class RetrievalService {
         RetrievalConfig cfg = override != null ? override : config;
         String trace =
                 traceId == null || traceId.isBlank() ? UUID.randomUUID().toString() : traceId;
+        String spanId = newSpanId();
+        Instant startedAt = Instant.now();
         long start = System.nanoTime();
-        List<Hit> hits =
-                mode == RetrievalMode.FIND
-                        ? findHits(scope, query, cfg)
-                        : searchHits(scope, query, cfg);
-        List<RetrievalItem> items = assemble(hits, cfg);
+        List<RetrievalItem> items;
+        try {
+            List<Hit> hits =
+                    mode == RetrievalMode.FIND
+                            ? findHits(scope, query, cfg)
+                            : searchHits(scope, query, cfg);
+            items = assemble(hits, cfg);
+        } catch (RuntimeException e) {
+            appendRetrievalLogQuietly(
+                    trace,
+                    spanId,
+                    scope,
+                    query,
+                    mode,
+                    List.of(),
+                    List.of(),
+                    startedAt,
+                    start,
+                    0,
+                    "ERROR",
+                    e.getMessage());
+            throw e;
+        }
         long latencyMs = (System.nanoTime() - start) / 1_000_000;
         int promptTokens = items.stream().mapToInt(item -> Tokens.estimate(item.content())).sum();
+        appendRetrievalLogQuietly(
+                trace,
+                spanId,
+                scope,
+                query,
+                mode,
+                items.stream().map(RetrievalItem::uri).toList(),
+                items.stream().map(item -> item.level().name()).toList(),
+                startedAt,
+                start,
+                promptTokens,
+                "OK",
+                null);
         return new RetrievalResult(
                 trace, mode, items, new RetrievalResult.TokenUsage(promptTokens, 0), latencyMs);
+    }
+
+    /** 记录 retrieval_log：链路日志缺省 / 写入失败时跳过，不影响检索主流程。 */
+    private void appendRetrievalLogQuietly(
+            String traceId,
+            String spanId,
+            String scope,
+            String query,
+            RetrievalMode mode,
+            List<String> retrievedUris,
+            List<String> levels,
+            Instant startedAt,
+            long startNanos,
+            int promptTokens,
+            String status,
+            String error) {
+        if (traceLogStore == null) {
+            return;
+        }
+        try {
+            traceLogStore.appendRetrievalLog(
+                    new RetrievalLogEntry(
+                            traceId,
+                            spanId,
+                            null,
+                            null,
+                            scope,
+                            query,
+                            mode.name().toLowerCase(Locale.ROOT),
+                            retrievedUris,
+                            levels,
+                            (System.nanoTime() - startNanos) / 1_000_000,
+                            promptTokens,
+                            0,
+                            status,
+                            error,
+                            startedAt));
+        } catch (RuntimeException e) {
+            log.debug("retrieval_log 写入跳过: traceId={}, error={}", traceId, e.getMessage());
+        }
+    }
+
+    /** 生成 16 位十六进制 spanId。 */
+    private String newSpanId() {
+        byte[] bytes = new byte[8];
+        random.nextBytes(bytes);
+        return HexFormat.of().formatHex(bytes);
     }
 
     /** 内部命中项：uri + 分数 + 相对命中目录的下钻深度。 */

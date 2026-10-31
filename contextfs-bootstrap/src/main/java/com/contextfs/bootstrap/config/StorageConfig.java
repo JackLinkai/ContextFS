@@ -4,10 +4,13 @@ import com.contextfs.core.port.CacheStore;
 import com.contextfs.core.port.EmbeddingClient;
 import com.contextfs.core.port.LlmClient;
 import com.contextfs.core.port.NodeRepository;
+import com.contextfs.observability.log.TraceLogStore;
+import com.contextfs.observability.trace.TraceSpanFilter;
 import com.contextfs.storage.llm.LangChain4jEmbeddingClient;
 import com.contextfs.storage.llm.LangChain4jLlmClient;
 import com.contextfs.storage.milvus.MilvusVectorStore;
 import com.contextfs.storage.pg.PgNodeRepository;
+import com.contextfs.storage.pg.PgTraceLogStore;
 import com.contextfs.storage.redis.RedisCacheStore;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Duration;
@@ -15,6 +18,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Primary;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.jdbc.core.JdbcTemplate;
 
@@ -26,6 +30,19 @@ public class StorageConfig {
     @Bean
     public NodeRepository nodeRepository(JdbcTemplate jdbcTemplate, ObjectMapper objectMapper) {
         return new PgNodeRepository(jdbcTemplate, objectMapper);
+    }
+
+    /** PostgreSQL 链路日志适配：retrieval_log / tool_call_log / trace_span 三表，@Primary 覆盖缺省内存实现。 */
+    @Bean
+    @Primary
+    public TraceLogStore traceLogStore(JdbcTemplate jdbcTemplate, ObjectMapper objectMapper) {
+        return new PgTraceLogStore(jdbcTemplate, objectMapper);
+    }
+
+    /** REST 入口链路过滤器：traceId 贯穿 + MDC 注入 + 入口 span 落库。 */
+    @Bean
+    public TraceSpanFilter traceSpanFilter(TraceLogStore traceLogStore) {
+        return new TraceSpanFilter(traceLogStore);
     }
 
     /** Redis 缓存适配（StringRedisTemplate 由 Spring Boot 自动装配，连接为惰性建立）。 */

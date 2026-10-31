@@ -11,6 +11,8 @@ import com.contextfs.core.model.NodeType;
 import com.contextfs.core.port.VectorRecord;
 import com.contextfs.core.uri.CtxfsUri;
 import com.contextfs.core.util.Tokens;
+import com.contextfs.observability.log.InMemoryTraceLogStore;
+import com.contextfs.observability.log.RetrievalLogEntry;
 import com.contextfs.retrieval.support.HashingEmbeddingClient;
 import java.time.Instant;
 import java.util.List;
@@ -278,6 +280,63 @@ class RetrievalServiceTest {
                     service.retrieve("global", "网络搜索", RetrievalMode.SEARCH, null, " ");
 
             assertThat(result.traceId()).isNotBlank();
+        }
+    }
+
+    @Nested
+    @DisplayName("可观测（retrieval_log）")
+    class Observability {
+
+        @Test
+        @DisplayName("retrieve 后写入 retrieval_log：命中 URI、层级与 token 可回放")
+        void writesRetrievalLog() {
+            InMemoryTraceLogStore store = new InMemoryTraceLogStore();
+            RetrievalService observed =
+                    new RetrievalService(repository, vectorStore, embeddingClient, CONFIG, store);
+
+            RetrievalResult result =
+                    observed.retrieve("global", "网络搜索", RetrievalMode.SEARCH, null, "trace-obs");
+
+            List<RetrievalLogEntry> logs = store.retrievalLogs("trace-obs");
+            assertThat(logs).hasSize(1);
+            RetrievalLogEntry entry = logs.get(0);
+            assertThat(entry.scope()).isEqualTo("global");
+            assertThat(entry.query()).isEqualTo("网络搜索");
+            assertThat(entry.mode()).isEqualTo("search");
+            assertThat(entry.status()).isEqualTo("OK");
+            assertThat(entry.spanId()).hasSize(16);
+            assertThat(entry.promptTokens()).isEqualTo(result.tokenUsage().promptTokens());
+            assertThat(entry.completionTokens()).isZero();
+            assertThat(entry.retrievedUris())
+                    .containsExactlyElementsOf(
+                            result.items().stream().map(RetrievalItem::uri).toList());
+            assertThat(entry.levels()).hasSameSizeAs(entry.retrievedUris());
+            assertThat(entry.createdAt()).isNotNull();
+        }
+
+        @Test
+        @DisplayName("traceId 缺省时用生成的 traceId 记录")
+        void logsGeneratedTraceId() {
+            InMemoryTraceLogStore store = new InMemoryTraceLogStore();
+            RetrievalService observed =
+                    new RetrievalService(repository, vectorStore, embeddingClient, CONFIG, store);
+
+            RetrievalResult result =
+                    observed.retrieve("global", "网络搜索", RetrievalMode.FIND, null, " ");
+
+            assertThat(store.retrievalLogs(result.traceId())).hasSize(1);
+        }
+
+        @Test
+        @DisplayName("链路日志缺省时不记录且不影响检索")
+        void skipsLoggingWithoutStore() {
+            RetrievalService plain =
+                    new RetrievalService(repository, vectorStore, embeddingClient, CONFIG);
+
+            RetrievalResult result =
+                    plain.retrieve("global", "网络搜索", RetrievalMode.FIND, null, "trace-none");
+
+            assertThat(result.items()).isNotEmpty();
         }
     }
 }

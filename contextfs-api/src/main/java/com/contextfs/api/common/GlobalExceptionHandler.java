@@ -4,6 +4,7 @@ import com.contextfs.core.exception.ContextFsException;
 import com.contextfs.core.exception.InvalidUriException;
 import com.contextfs.core.exception.NodeNotFoundException;
 import com.contextfs.core.exception.ScopeViolationException;
+import com.contextfs.core.exception.TraceNotFoundException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
@@ -28,6 +29,11 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(NodeNotFoundException.class)
     public ResponseEntity<ApiResponse<Void>> handleNodeNotFound(NodeNotFoundException e) {
+        return build(HttpStatus.NOT_FOUND, e.getMessage());
+    }
+
+    @ExceptionHandler(TraceNotFoundException.class)
+    public ResponseEntity<ApiResponse<Void>> handleTraceNotFound(TraceNotFoundException e) {
         return build(HttpStatus.NOT_FOUND, e.getMessage());
     }
 

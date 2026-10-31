@@ -7,8 +7,10 @@ import com.contextfs.core.exception.ScopeViolationException;
 import com.contextfs.memory.pipeline.CommitOutcome;
 import com.contextfs.memory.pipeline.MemoryPipelineService;
 import com.contextfs.memory.pipeline.SessionMessage;
+import com.contextfs.observability.trace.TraceSpanFilter;
 import jakarta.validation.Valid;
 import java.util.List;
+import java.util.UUID;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -41,8 +43,9 @@ public class SessionController {
     public ApiResponse<SessionCommitResultDto> commit(
             @PathVariable String sessionId,
             @Valid @RequestBody SessionCommitRequest request,
-            @RequestHeader(value = FsController.SCOPE_HEADER, required = false)
-                    String allowedScope) {
+            @RequestHeader(value = FsController.SCOPE_HEADER, required = false) String allowedScope,
+            @RequestHeader(value = TraceSpanFilter.TRACE_HEADER, required = false)
+                    String traceHeader) {
         String targetScope = targetScope(request);
         if (allowedScope != null && !allowedScope.isBlank() && !allowedScope.equals(targetScope)) {
             throw new ScopeViolationException(
@@ -52,13 +55,18 @@ public class SessionController {
                             + allowedScope
                             + "'");
         }
+        // 链路追踪：入口过滤器注入的 traceId 优先，缺省生成
+        String traceId =
+                traceHeader == null || traceHeader.isBlank()
+                        ? UUID.randomUUID().toString()
+                        : traceHeader.trim();
         List<SessionMessage> messages =
                 request.messages().stream()
                         .map(message -> new SessionMessage(message.role(), message.content()))
                         .toList();
         if (memoryPipelineService.isAsync()) {
             memoryPipelineService.commitAsync(
-                    sessionId, request.agentId(), request.userId(), messages);
+                    sessionId, request.agentId(), request.userId(), messages, traceId);
             return ApiResponse.ok(
                     new SessionCommitResultDto(
                             sessionId,
@@ -68,7 +76,7 @@ public class SessionController {
         }
         CommitOutcome outcome =
                 memoryPipelineService.commit(
-                        sessionId, request.agentId(), request.userId(), messages);
+                        sessionId, request.agentId(), request.userId(), messages, traceId);
         return ApiResponse.ok(toResult(sessionId, outcome, STATUS_COMPLETED));
     }
 

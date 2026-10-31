@@ -9,11 +9,14 @@ import com.contextfs.core.model.Level;
 import com.contextfs.core.model.NodeLevel;
 import com.contextfs.core.model.NodeType;
 import com.contextfs.core.uri.CtxfsUri;
+import com.contextfs.observability.log.InMemoryTraceLogStore;
+import com.contextfs.observability.log.ToolCallLogEntry;
 import com.contextfs.retrieval.engine.RetrievalConfig;
 import com.contextfs.retrieval.engine.RetrievalMode;
 import com.contextfs.retrieval.engine.RetrievalResult;
 import com.contextfs.retrieval.engine.RetrievalService;
 import com.contextfs.retrieval.support.HashingEmbeddingClient;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.List;
 import java.util.Optional;
 import org.junit.jupiter.api.BeforeEach;
@@ -267,6 +270,63 @@ class MemoryPipelineServiceTest {
             assertThat(MemoryPipelineService.lexicalSimilarity("用户偏好暗色主题", "数据库部署在云端"))
                     .isLessThan(0.2);
             assertThat(MemoryPipelineService.lexicalSimilarity(null, "任意")).isZero();
+        }
+    }
+
+    @Nested
+    @DisplayName("可观测（tool_call_log）")
+    class Observability {
+
+        @Test
+        @DisplayName("commit 后写入提取与决策记录，traceId 贯穿")
+        void writesToolCallLogs() {
+            InMemoryTraceLogStore store = new InMemoryTraceLogStore();
+            MemoryPipelineService observed =
+                    new MemoryPipelineService(
+                            repository,
+                            embeddingClient,
+                            vectorStore,
+                            new MemoryExtractor(),
+                            true,
+                            MemoryPipelineService.SYNC_EXECUTOR,
+                            store,
+                            new ObjectMapper());
+            observed.commit("sess-obs", "coder", "10001", PREFERENCE_MESSAGES, "trace-mem-001");
+
+            List<ToolCallLogEntry> logs = store.toolCallLogs("trace-mem-001");
+            assertThat(logs).hasSize(2);
+            assertThat(logs.get(0).tool()).isEqualTo(MemoryPipelineService.TOOL_EXTRACT);
+            assertThat(logs.get(0).sessionId()).isEqualTo("sess-obs");
+            assertThat(logs.get(0).agentId()).isEqualTo("coder");
+            assertThat(logs.get(0).output()).contains("PREFERENCE");
+            assertThat(logs.get(0).spanId()).hasSize(16);
+            assertThat(logs.get(1).tool()).isEqualTo(MemoryPipelineService.TOOL_DECIDE);
+            assertThat(logs.get(1).output()).contains("CREATED");
+            assertThat(logs.get(1).status()).isEqualTo("OK");
+            assertThat(logs.get(1).latencyMs()).isGreaterThanOrEqualTo(0);
+        }
+
+        @Test
+        @DisplayName("enabled=false 仅归档，不写 tool_call_log")
+        void disabledPipelineWritesNoToolCallLogs() {
+            InMemoryTraceLogStore store = new InMemoryTraceLogStore();
+            MemoryPipelineService disabled =
+                    new MemoryPipelineService(
+                            repository,
+                            embeddingClient,
+                            vectorStore,
+                            new MemoryExtractor(),
+                            false,
+                            MemoryPipelineService.SYNC_EXECUTOR,
+                            store,
+                            new ObjectMapper());
+            disabled.commit("sess-off", "coder", "10001", PREFERENCE_MESSAGES, "trace-off");
+
+            assertThat(store.toolCallLogs("trace-off")).isEmpty();
+            assertThat(
+                            disabled.commit("sess-off2", "coder", "10001", PREFERENCE_MESSAGES)
+                                    .archivedUri())
+                    .isEqualTo("ctxfs://session/sess-off2/archive.md");
         }
     }
 }
