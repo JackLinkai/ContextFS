@@ -13,8 +13,19 @@ spring:
       host: ${REDIS_HOST:localhost}
       port: ${REDIS_PORT:6379}
   flyway:
-    # 阶段 2 仅交付存储适配与迁移脚本；阶段 3 装配存储 Bean 时启用
-    enabled: false
+    enabled: true
+
+contextfs:
+  cache:
+    # 读路径缓存 TTL（ISO-8601 时长）
+    read-ttl: ${CACHE_READ_TTL:PT10M}
+  storage:
+    milvus:
+      # Milvus 适配构造即建立 gRPC 连接，阶段 4 接入向量化时再显式开启
+      enabled: ${MILVUS_ENABLED:false}
+      host: ${MILVUS_HOST:localhost}
+      port: ${MILVUS_PORT:19530}
+      dimension: ${MILVUS_DIMENSION:1024}
 
 management:
   endpoints:

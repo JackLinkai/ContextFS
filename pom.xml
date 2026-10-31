@@ -93,6 +93,8 @@
                     <version>${maven-compiler-plugin.version}</version>
                     <configuration>
                         <release>${java.version}</release>
+                        <!-- Spring MVC 参数绑定依赖 -parameters 保留形参名 -->
+                        <parameters>true</parameters>
                     </configuration>
                 </plugin>
                 <plugin>
